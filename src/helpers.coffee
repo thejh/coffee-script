@@ -54,3 +54,7 @@ exports.del = (obj, key) ->
 
 # Gets the last item of an array(-like) object.
 exports.last = (array, back) -> array[array.length - (back or 0) - 1]
+
+exports.contains = (array, object) ->
+  return true for element in array when element is object
+  return false

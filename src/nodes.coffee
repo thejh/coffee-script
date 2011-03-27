@@ -6,7 +6,7 @@
 {Scope} = require './scope'
 
 # Import the helpers we plan to use.
-{compact, flatten, extend, merge, del, starts, ends, last} = require './helpers'
+{compact, contains, flatten, extend, merge, del, starts, ends, last} = require './helpers'
 
 exports.extend = extend  # for parser
 
@@ -109,17 +109,52 @@ exports.Base = class Base
     tree
 
   # Passes each child to a function, breaking when the function returns `false`.
-  eachChild: (func) ->
-    return this unless @children
+  eachChild: (func, returnOnNonfalse = false, returnForChain = false) ->
+    if @children
+      for attr in @children when @[attr]
+        for child in flatten [@[attr]]
+          result = func(child)
+          if not returnOnNonfalse and result is false
+            return if returnForChain then false else this
+          if returnOnNonfalse and result
+            return result
+    if returnOnNonfalse then false else this
+  
+  childCount: ->
+    n = 0
+    @eachChild ->
+      ++n
+    , false
+    n
+  
+  replaceChild: (oldChild, newChild) ->
     for attr in @children when @[attr]
-      for child in flatten [@[attr]]
-        return this if func(child) is false
-    this
+      if @[attr] instanceof Array
+        for child, i in @[attr]
+          if child is oldChild
+            @[attr][i] = newChild
+            return true
+      else if @[attr] is oldChild
+        @[attr] = newChild
+        return true
+    false
 
   traverseChildren: (crossScope, func) ->
     @eachChild (child) ->
       return false if func(child) is false
       child.traverseChildren crossScope, func
+  
+  # func(child, pathToChild)
+  # pathToChild doesn't contain the child itself
+  traverseChildrenDeep: (crossScope, func, path = [@]) ->
+    return @eachChild (child) ->
+      path.push child
+      if result = child.traverseChildrenDeep crossScope, func, path
+        return result
+      path.pop()
+      if result = func child, path
+        return result
+    , true, true
 
   invert: ->
     new Op '!', this
@@ -128,6 +163,32 @@ exports.Base = class Base
     node = this
     continue until node is node = node.unwrap()
     node
+  
+  collectImplicitLoopIdentifiers: (depth) ->
+    @implicitLoopIdentifiers = []
+    @eachChild (child) =>
+      @implicitLoopIdentifiers.push merge implicitLoopIdentifier, {source: child} for implicitLoopIdentifier in child.implicitLoopIdentifiers
+    false
+  
+  hasLoopIdentifierCollision: (identifier) ->
+    count = 0
+    count++ for element in @implicitLoopIdentifiers when element.identifier is identifier and element.isSource
+    count > 1
+  
+  loopIdentifierSources: (identifier) ->
+    count = 0
+    if not @implicitLoopIdentifiers?
+      console.log "how can it be that this #{@constructor.name} doesn't have implicitLoopIdentifiers?"
+      return 0
+    sources = []
+    for element in @implicitLoopIdentifiers when (typeof element.identifier) != "string"
+      console.log "This isn't an identifier!"
+      
+    for element in @implicitLoopIdentifiers when element.identifier is identifier and not contains sources, element
+      count++
+      sources.push element
+      
+    count
 
   # Default implementations of the common node properties and methods. Nodes
   # will override these with custom logic, if needed.
@@ -232,6 +293,12 @@ exports.Block = class Block extends Base
     o.indent = @tab = if o.bare then '' else TAB
     o.scope  = new Scope null, this, null
     o.level  = LEVEL_TOP
+    
+    loop
+      if (@traverseChildrenDeep true, (child, path) -> child.collectImplicitLoopIdentifiers path.length)
+        throw "this shouldn't break"
+      break unless (@traverseChildrenDeep true, (child, path) -> child.findOwnIdentifierScope? path)
+    
     code     = @compileWithDeclarations o
     if o.bare then code else "(function() {\n#{code}\n}).call(this);\n"
 
@@ -417,6 +484,51 @@ exports.Value = class Value extends Base
         snd.base = ref
       return new If new Existence(fst), snd, soak: on
     null
+
+#### LoopIndex
+
+# An index that implies a loop. Wohoo!
+exports.LoopIndex = class LoopIndex extends Base
+  constructor: (@identifier, type) ->
+    @child = new Index @identifier
+    if type is '='
+      @isSource = true
+    @implicitLoopIdentifiers = [{identifier: @identifier.value, @isSource}]
+  
+  children: ['child']
+  
+  collectImplicitLoopIdentifiers: ->
+    # we've already got ours
+    false
+  
+  compileNode: (o) ->
+    return @child.compile o
+  
+  findOwnIdentifierScope: (path) ->
+    return false if not @isSource or @scopeFound
+    @scopeFound = true
+    i = path.length - 1
+    while i > 2#FIXME should be 0
+      if path[i].hasLoopIdentifierCollision @identifier.value
+        i++
+        break
+      i--
+    # path[i] is the highest node that could be the border, scan back in this direction until it branches...
+    loop
+      sourceCount = path[i].loopIdentifierSources @identifier.value
+      if sourceCount >= 2
+        break
+      else if sourceCount < 1
+        console.log "this shouldn't happen..."
+      i++
+      if i >= path.length
+        console.log "it never branches?"
+        break
+    if not (path[i-1].replaceChild path[i], new For path[i], {source: path[path.length-1].base, indexes: [@identifier]})
+      console.log 'error'
+      throw 'not replaced correctly'
+    # we messed with the tree, and walking back an altered tree is a bad idea
+    return typeof path[i]
 
 #### Comment
 
