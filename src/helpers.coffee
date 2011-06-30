@@ -54,3 +54,22 @@ exports.del = (obj, key) ->
 
 # Gets the last item of an array(-like) object.
 exports.last = (array, back) -> array[array.length - (back or 0) - 1]
+
+exports.deepCopy = deepCopy = (obj) ->
+  copy = {}
+  for key, val of obj
+    if typeof val is 'object' or typeof val is 'array'
+      copy[key] = deepCopy val
+    else
+      copy[key] = val
+  if obj.prototype?
+    copy.prototype = obj.prototype
+  copy
+
+exports.deepReplace = deepReplace = (obj, f) ->
+  return if typeof obj isnt 'object' and typeof obj isnt 'array'
+  for key, val of obj
+    newVal = f val
+    if newVal?
+      obj[key] = newVal
+    deepReplace val, f

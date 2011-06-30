@@ -6,7 +6,7 @@
 {Scope} = require './scope'
 
 # Import the helpers we plan to use.
-{compact, flatten, extend, merge, del, starts, ends, last} = require './helpers'
+{compact, deepCopy, deepReplace, flatten, extend, merge, del, starts, ends, last} = require './helpers'
 
 exports.extend = extend  # for parser
 
@@ -35,15 +35,17 @@ exports.Base = class Base
   # the top level of a block (which would be unnecessary), and we haven't
   # already been asked to return the result (because statements know how to
   # return results).
-  compile: (o, lvl) ->
+  compile: (o, lvl, oFunc) ->
     o        = extend {}, o
     o.level  = lvl if lvl
     node     = @unfoldSoak(o) or this
     node.tab = o.indent
-    if o.level is LEVEL_TOP or not node.isStatement(o)
+    result = if o.level is LEVEL_TOP or not node.isStatement(o)
       node.compileNode o
     else
       node.compileClosure o
+    oFunc? o
+    result
 
   # Statements converted into expressions via closure-wrapping share a scope
   # object with their parent closure, to preserve the expected lexical scope.
@@ -211,15 +213,22 @@ exports.Block = class Block extends Base
     @tab  = o.indent
     top   = o.level is LEVEL_TOP
     codes = []
+    copyBack = (oChild) ->
+      for name, value of oChild when 0 is name.indexOf 'declare_alias_'
+        name = name.substring 8
+        if o[name]?
+          console.error "duplicate alias declaration for '#{name}'"
+        else
+          o[name] = value
     for node in @expressions
       node = node.unwrapAll()
       node = (node.unfoldSoak(o) or node)
       if top
         node.front = true
-        code = node.compile o
+        code = node.compile o, null, copyBack
         codes.push if node.isStatement o then code else @tab + code + ';'
       else
-        codes.push node.compile o, LEVEL_LIST
+        codes.push node.compile o, LEVEL_LIST, copyBack
     return codes.join '\n' if top
     code = codes.join(', ') or 'void 0'
     if codes.length > 1 and o.level >= LEVEL_LIST then "(#{code})" else code
@@ -298,9 +307,10 @@ exports.Literal = class Literal extends Base
     else if @value.reserved
       "\"#{@value}\""
     else
-      if @identifier and aliasValue = o["alias_#{@value}"]
+      if @identifier and o["alias_#{@value}"]?
         @isAlias = true
-        aliasValue
+        aliasValue = o["alias_#{@value}"] []
+        aliasValue.compile o
       else
         @value
     if @isStatement() then "#{@tab}#{code};" else code
@@ -1047,6 +1057,34 @@ exports.Assign = class Assign extends Base
     code = "[].splice.apply(#{name}, [#{fromDecl}, #{to}].concat(#{valDef})), #{valRef}"
     if o.level > LEVEL_TOP then "(#{code})" else code
 
+#### AliasAssign
+
+# An assignment of an expression or function to an alias.
+exports.AliasAssign = class AliasAssign extends Base
+  constructor: (identifier, @value) ->
+    @name = identifier.value
+    if @value instanceof Code
+      @substitutions = @value.params
+      @value = @value.body
+  
+  compileHelper = (value, substitutions, args) ->
+    value = deepCopy value
+    if substitutions?
+      for argName, i in substitutions
+        if args[i]?
+          replacement = args[i]
+        else
+          # FIXME maybe `void 0` would be better?
+          replacement = new Literal 'null'
+        deepReplace value, (literal) ->
+          replacement if literal instanceof Literal and literal.value is argName
+    new Parens value
+  
+  compileNode: (o) ->
+    o["declare_alias_#{@name}"] = (args) =>
+      compileHelper @value, @substitutions, args
+    "/* alias assignment for '#{@name}' */"
+
 #### Code
 
 # A function definition. This is the only node that creates a new Scope.
@@ -1553,8 +1591,8 @@ exports.For = class For extends Base
         forVarPart = "#{ivar} = 0, #{lvar} = #{svar}.length" + if @step then ", #{stepvar} = #{@step.compile(o, LEVEL_OP)}" else ''
         stepPart   = if @step then "#{ivar} += #{stepvar}" else "#{ivar}++"
         forPart    = "#{forVarPart}; #{ivar} < #{lvar}; #{stepPart}"
-    o = extend {}, o
-    o["alias_#{name}"] = "#{svar}[#{ivar}]" if name and @name.asAlias
+    if name and @name.asAlias
+      o["alias_#{name}"] = -> compile: -> new Value(new Literal svar).push(new Index new Literal ivar).compileNode {}
     if @returns
       resultPart   = "#{@tab}#{rvar} = [];\n"
       returnResult = "\n#{@tab}return #{rvar};"

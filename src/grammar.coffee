@@ -72,6 +72,7 @@ grammar =
   Line: [
     o 'Expression'
     o 'Statement'
+    o 'AliasAssign'
   ]
 
   # Pure statements which cannot be expressions.
@@ -136,6 +137,12 @@ grammar =
   Assign: [
     o 'Assignable = Expression',                -> new Assign $1, $3
     o 'Assignable = INDENT Expression OUTDENT', -> new Assign $1, $4
+  ]
+  
+  # Assign something function-like to an alias name
+  AliasAssign: [
+    o 'Identifier =* Expression',                -> new AliasAssign $1, $3
+    o 'Identifier =* INDENT Expression OUTDENT', -> new AliasAssign $1, $4
   ]
 
   # Assignment when it happens within an object literal. The difference from
